@@ -1,0 +1,213 @@
+#include "defines.h"
+
+float screen_height = DIM;
+float screen_width = DIM;
+
+float square(float x)
+{
+	return x*x;
+}
+
+
+void accelerate(half2 coords : WPOS, uniform float2 force, uniform float2 pos, out half4 xNew : COLOR, uniform samplerRECT v)
+{
+	float4 vel = texRECT(v,coords); //Current velocity
+	float l = distance(coords,pos);
+	l=l/ir;
+	
+	force.x/=100;
+	force.y/=100;
+	
+	l=exp(-l);
+
+	float delvx= ff*force.x*dt*l;
+	float delvy= ff*force.y*dt*l;
+	if ( abs(delvx) < 0.01) delvx =0;
+	if ( abs(delvy) < 0.01) delvy =0;
+	xNew.x = vel.x + delvx;
+	xNew.y = vel.y + delvy;
+}
+
+float4 f4texRECTbilerp(samplerRECT tex, float2 s)
+{
+  float4 st;
+  st.xy = floor(s - 0.5) + 0.5;
+  st.zw = st.xy + 1;
+ 
+  float2 t = s - st.xy; //interpolating factors
+   
+  float4 tex11 = texRECT(tex, st.xy);
+  float4 tex21 = texRECT(tex, st.zy);
+  float4 tex12 = texRECT(tex, st.xw);
+  float4 tex22 = texRECT(tex, st.zw);
+
+  // bilinear interpolation
+  return lerp(lerp(tex11, tex21, t.x), lerp(tex12, tex22, t.x), t.y);
+}
+
+
+void advect(half2 coords   : WPOS,   // grid coordinates
+            
+   out 
+   half4 xNew : COLOR,  // result
+            
+   uniform 
+   float timestep,
+            uniform 
+   float rdx,     
+            
+   uniform samplerRECT x,   //Qty to be advected
+            
+   uniform samplerRECT u)   //Velocity profile
+{
+ 	float2 pos = coords - timestep * rdx * f2texRECT(u, coords);
+
+  // interpolate and write to the output fragment
+  xNew = f4texRECTbilerp(x, pos);
+}
+
+
+void compvorticity(half2 coords : WPOS, out half c : COLOR, uniform samplerRECT x)
+{
+  half4 xL = h4texRECT(x, coords - half2(1, 0));
+  half4 xR = h4texRECT(x, coords + half2(1, 0));
+  half4 xB = h4texRECT(x, coords - half2(0, 1));
+  half4 xT = h4texRECT(x, coords + half2(0, 1));
+
+  half a = (xR.y - xL.y)/(2*dx);
+  half b = (xT.x - xB.y)/(2*dx);
+
+  c=a+b;	
+
+}
+
+void applyvorticity(half2 coords : WPOS,uniform samplerRECT w, uniform samplerRECT v, out half4 xNew : COLOR)
+{
+
+	half wL = h4texRECT(w, coords - half2(1, 0));
+  	half wR = h4texRECT(w, coords + half2(1, 0));
+  	half wB = h4texRECT(w, coords - half2(0, 1));
+  	half wT = h4texRECT(w, coords + half2(0, 1));
+
+	half wC = h4texRECT(w, coords);
+
+	half nx = (wR-wL)/(2*dx);
+	half ny = (wT-wB)/(2*dx);
+
+	//Normalizing : 
+
+	if (nx || ny)
+	{
+		nx = nx * rsqrt(nx*nx + ny*ny);
+		ny = ny * rsqrt(nx*nx + ny*ny);
+
+	}
+
+	half4 vel = h4texRECT(v,coords);
+
+	half4 add;
+
+	add.x = epsilon*dx*dt*wC*ny;
+	add.y = -epsilon*dx*dt*wC*nx;
+
+	xNew.x = vel.x + add.x;
+	xNew.y = vel.y + add.y;
+	
+	
+
+}
+
+void jacobi(half2 coords   : WPOS,   // grid coordinates
+            
+   out 
+   half4 xNew : COLOR,  // result
+            
+   uniform 
+   half alpha,
+            uniform 
+   half rBeta,      // reciprocal beta
+            
+   uniform samplerRECT x,   // x vector (Ax = b)
+            
+   uniform samplerRECT b)   // b vector (Ax = b)
+{
+  // left, right, bottom, and top x samples
+  
+  half4 xL = h4texRECT(x, coords - half2(1, 0));
+  half4 xR = h4texRECT(x, coords + half2(1, 0));
+  half4 xB = h4texRECT(x, coords - half2(0, 1));
+  half4 xT = h4texRECT(x, coords + half2(0, 1));
+
+  // b sample, from center
+  
+   half4 bC = h4texRECT(b, coords);
+
+  // evaluate Jacobi iteration
+  xNew = (xL + xR + xB + xT + alpha * bC) * rBeta;
+}
+
+void divergence(half2 coords  : WPOS,   // grid coordinates
+                
+   out 
+   half4 div : COLOR,  // divergence
+                
+   uniform half halfrdx,   // 0.5 / gridscale
+                
+   uniform samplerRECT w)  // vector field
+{
+  half4 wL = h4texRECT(w, coords - half2(1, 0));
+  half4 wR = h4texRECT(w, coords + half2(1, 0));
+  half4 wB = h4texRECT(w, coords - half2(0, 1));
+  half4 wT = h4texRECT(w, coords + half2(0, 1));
+
+  div = halfrdx * ((wR.x - wL.x) + (wT.y - wB.y));
+}
+
+
+void gradient(float2 coords   : WPOS,   // grid coordinates
+              
+   out float2 uNew : COLOR,  // new velocity
+              
+   uniform half halfrdx,    // 0.5 / gridscale
+              
+   uniform samplerRECT p,   // pressure
+              
+   uniform samplerRECT w)   // velocity
+{
+  half pL = h1texRECT(p, coords - half2(1, 0));
+  half pR = h1texRECT(p, coords + half2(1, 0));
+  half pB = h1texRECT(p, coords - half2(0, 1));
+  half pT = h1texRECT(p, coords + half2(0, 1));
+
+  uNew = f4texRECT(w, coords);
+  uNew.xy -= halfrdx * half2(pR - pL, pT - pB);
+}
+
+
+
+void boundary(float2       coords : WPOS, 
+          out float4      bv  : COLOR   ,
+      uniform float        scale, 
+      uniform samplerRECT x)
+{
+  half2 offset; 
+
+  if (coords.x==0.5) offset=half2(1,0);
+  else if (coords.x==screen_width-0.5) offset=half2(-1,0);
+  else if (coords.y==0.5) offset=half2(0,1);
+  else if (coords.y==screen_height-0.5) offset=half2(0,-1);
+  else 
+  {
+	offset=half2(0,0);
+	scale=1;
+  }
+  bv = scale * texRECT(x, coords + offset);
+} 
+
+
+
+void colorpixel( float2 coords: WPOS, out float4 co : COLOR, uniform samplerRECT x)
+{
+	co = texRECT(x,coords);
+}
+
